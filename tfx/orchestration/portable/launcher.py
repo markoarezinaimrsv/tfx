@@ -14,7 +14,7 @@
 """This module defines a generic Launcher for all TFleX nodes."""
 
 import traceback
-from typing import Any, Dict, List, Optional, Text, Type, TypeVar
+from typing import Any, Dict, List, Optional, Text, Type, TypeVar, cast
 
 from absl import logging
 import attr
@@ -28,9 +28,11 @@ from tfx.orchestration.portable import inputs_utils
 from tfx.orchestration.portable import outputs_utils
 from tfx.orchestration.portable import python_executor_operator
 from tfx.orchestration.portable.mlmd import context_lib
+from tfx.proto.orchestration import driver_output_pb2
 from tfx.proto.orchestration import execution_result_pb2
 from tfx.proto.orchestration import local_deployment_config_pb2
 from tfx.proto.orchestration import pipeline_pb2
+from tfx.utils import import_utils
 
 from google.protobuf import message
 from ml_metadata.proto import metadata_store_pb2
@@ -106,8 +108,6 @@ class Launcher(object):
       ValueError: when component and component_config are not launchable by the
       launcher.
     """
-    del custom_driver_spec
-
     self._pipeline_node = pipeline_node
     self._mlmd_connection = mlmd_connection
     self._pipeline_info = pipeline_info
@@ -122,6 +122,16 @@ class Launcher(object):
         pipeline_node=self._pipeline_node,
         pipeline_info=self._pipeline_info,
         pipeline_runtime_spec=self._pipeline_runtime_spec)
+
+    # Driver is running on local only for now.
+    python_class_driver_spec = cast(
+        pipeline_pb2.ExecutorSpec.PythonClassExecutorSpec, custom_driver_spec)
+    self._driver = None
+    if custom_driver_spec:
+      self._driver = import_utils.import_class_by_path(
+          python_class_driver_spec.class_path)(self._mlmd_connection,
+                                               self._pipeline_info,
+                                               self._pipeline_node)
 
   def _prepare_execution(self) -> _PrepareExecutionResult:
     """Prepare inputs, outputs and execution properties for actual execution."""
@@ -159,8 +169,16 @@ class Launcher(object):
       # 5. Resolve output
       output_artifacts = self._output_resolver.generate_output_artifacts(
           execution.id)
-      # TODO(b/150979622): support custom driver
 
+      # If there is a custom driver, runs it.
+      if self._driver:
+        driver_output = self._driver.run(input_artifacts, output_artifacts,
+                                         exec_properties)
+        self._update_with_driver_output(driver_output, output_artifacts)
+
+    # We reconnect to MLMD here because the custom driver may or may not close
+    # the connection.
+    with self._mlmd_connection as m:
       # 6. Check cached result
       cache_context = cache_utils.get_cache_context(
           metadata_handler=m,
@@ -244,6 +262,17 @@ class Launcher(object):
 
   def _clean_up(self, execution_info: base_executor_operator.ExecutionInfo):
     tf.io.gfile.rmtree(execution_info.stateful_working_dir)
+
+  def _update_with_driver_output(self,
+                                 driver_output: driver_output_pb2.DriverOutput,
+                                 output_dict: Dict[Text, List[types.Artifact]]):
+    for key, artifact_list in driver_output.output_artifacts.items():
+      original_output_list = output_dict[key]
+      for i, artifact in enumerate(artifact_list.artifacts):
+        # We assume that the original output artifact and driver_output
+        # share the same index. This should be garanteed by the driver
+        # implementation.
+        original_output_list[i].set_mlmd_artifact(artifact)
 
   def launch(self) -> Optional[metadata_store_pb2.Execution]:
     """Executes the component, includes driver, executor and publisher.
