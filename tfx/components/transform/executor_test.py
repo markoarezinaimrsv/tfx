@@ -125,18 +125,19 @@ class ExecutorTest(tft_unit.TransformTestCase):
       train_pattern = os.path.join(self._transformed_examples.uri, 'train', '*')
       train_files = tf.io.gfile.glob(train_pattern)
       self.assertNotEqual(0, len(train_files))
-      train_dataset = tf.data.TFRecordDataset(
-          train_files, compression_type='GZIP')
-      train_count = sum(1 for record in train_dataset)
 
       eval_pattern = os.path.join(self._transformed_examples.uri, 'eval', '*')
       eval_files = tf.io.gfile.glob(eval_pattern)
       self.assertNotEqual(0, len(eval_files))
-      eval_dataset = tf.data.TFRecordDataset(
-          eval_files, compression_type='GZIP')
-      eval_count = sum(1 for record in eval_dataset)
 
-      self.assertGreater(train_count, eval_count)
+      if tf.executing_eagerly():
+        train_dataset = tf.data.TFRecordDataset(
+            train_files, compression_type='GZIP')
+        train_count = sum(1 for record in train_dataset)
+        eval_dataset = tf.data.TFRecordDataset(
+            eval_files, compression_type='GZIP')
+        eval_count = sum(1 for record in eval_dataset)
+        self.assertGreater(train_count, eval_count)
 
     # Depending on `materialize` and `store_cache`, check that
     # expected outputs are exactly correct. If either flag is False, its
